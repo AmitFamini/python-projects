@@ -1,0 +1,164 @@
+import socket
+import threading
+import pyautogui
+import cv2
+import numpy as np
+import time
+from pynput.mouse import Button, Controller as MouseController
+from pynput.keyboard import Key, Controller as KeyboardController
+
+# Initialize controllers
+mouse = MouseController()
+keyboard = KeyboardController()
+
+
+def capture_screen_with_cursor():
+    """
+    Captures a screenshot of the current screen and overlays the mouse cursor.
+
+    :return: Screenshot with cursor overlaid as a NumPy array.
+    """
+    screenshot = pyautogui.screenshot()
+    screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+    cursor_x, cursor_y = pyautogui.position()
+    cursor_size = 5
+    cv2.circle(screenshot, (cursor_x, cursor_y), cursor_size, (0, 0, 255), -1)
+    return screenshot
+
+
+def send_screen_to_server(ip, port):
+    """
+    Captures the screen and sends it to the server continuously.
+
+    :param ip: Server IP address.
+    :param port: Server port.
+    """
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.connect((ip, port))
+
+    while True:
+        frame = capture_screen_with_cursor()
+        _, frame_encoded = cv2.imencode('.jpg', frame)
+        frame_bytes = frame_encoded.tobytes()
+        frame_size = len(frame_bytes)
+        client_socket.sendall(frame_size.to_bytes(4, byteorder='big'))
+        client_socket.sendall(frame_bytes)
+        time.sleep(1 / 40)  # Target ~40 FPS
+
+
+def handle_mouse_action(action, *args):
+    """
+    Executes a mouse action based on the received command.
+
+    :param action: String representing the action (move, click, scroll).
+    :param args: Additional arguments depending on the action.
+    """
+    if action == "Pointer moved":
+        x, y = args
+        mouse.position = (x - 8, y - 31)  # Adjust for window decorations
+    elif action == "Pressed":
+        mouse.press(Button.left)
+    elif action == "Released":
+        mouse.release(Button.left)
+    elif action == "Right Pressed":
+        mouse.press(Button.right)
+    elif action == "Right Released":
+        mouse.release(Button.right)
+    elif action == "Scrolled up":
+        mouse.scroll(0, 1)
+    elif action == "Scrolled down":
+        mouse.scroll(0, -1)
+
+
+def handle_keyboard_action(action, key):
+    """
+    Executes a keyboard action based on the received command.
+
+    :param action: String representing the action (key press or release).
+    :param key: The key to press or release.
+    """
+    if action == "Alphanumeric key pressed":
+        keyboard.press(key)
+        keyboard.release(key)
+    elif action == "Special key pressed":
+        key = eval(key)  # Convert string 'Key.space' to Key.space
+        keyboard.press(key)
+        keyboard.release(key)
+    elif action.endswith("released"):
+        key = eval(key)
+        keyboard.release(key)
+
+
+def process_message(msg):
+    """
+    Processes a control message from the server.
+
+    :param msg: The control message from the server.
+    """
+    if msg.startswith("Pointer moved to"):
+        try:
+            cords = msg.split("to")[1].strip().strip("()")
+            x, y = map(int, cords.split(","))
+            handle_mouse_action("Pointer moved", x, y)
+        except ValueError:
+            print("Error parsing coordinates.")
+    elif msg.startswith("Pressed at") or msg.startswith("Released at"):
+        action = "Pressed" if "Pressed" in msg else "Released"
+        handle_mouse_action(action)
+    elif msg.startswith("Right Pressed at") or msg.startswith("Right Released at"):
+        action = "Right Pressed" if "Right Pressed" in msg else "Right Released"
+        handle_mouse_action(action)
+    elif msg.startswith("Scrolled"):
+        direction = "Scrolled down" if "down" in msg else "Scrolled up"
+        handle_mouse_action(direction)
+    elif "key" in msg:
+        action, key = msg.rsplit(" ", 1)
+        handle_keyboard_action(action, key)
+
+
+def listen_to_server(sock):
+    """
+    Listens for control messages from the server.
+
+    :param sock: The socket connected to the server.
+    """
+    while True:
+        try:
+            msg_length = sock.recv(2).decode()
+            msg = sock.recv(int(msg_length)).decode()
+        except ValueError:
+            print("Error receiving message")
+        else:
+            if msg:
+                print("Message from server:", msg)
+                process_message(msg)
+
+
+def start_client():
+    """
+    Starts the client, connects to the server, and initiates screen sharing
+    and control message handling.
+    """
+    control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    control_socket.connect(("192.168.1.191", 8820))
+
+    # Start screen sharing in a separate thread
+    screen_sharing_thread = threading.Thread(target=send_screen_to_server, args=("192.168.1.191", 8080))
+
+    # Start server listener for control messages in a separate thread
+    server_listener_thread = threading.Thread(target=listen_to_server, args=(control_socket,))
+
+    # Start the threads
+    screen_sharing_thread.start()
+    server_listener_thread.start()
+
+    # Wait for both threads to finish
+    screen_sharing_thread.join()
+    server_listener_thread.join()
+
+    # Close the control socket when done
+    control_socket.close()
+
+
+if __name__ == "__main__":
+    start_client()

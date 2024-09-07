@@ -1,0 +1,151 @@
+import socket
+import threading
+import cv2
+import numpy as np
+from pynput import mouse, keyboard
+
+
+def on_press(key):
+    """
+    Handles keyboard press events and sends them to the client.
+
+    :param key: Key object representing the pressed key.
+    """
+    try:
+        msg = f'Alphanumeric key pressed {key.char}'
+    except AttributeError:
+        msg = f'Special key pressed {key}'
+    send_control_message(msg)
+
+
+def on_release(key):
+    """
+    Handles keyboard release events and sends them to the client.
+
+    :param key: Key object representing the released key.
+    """
+    msg = f'released {key}'
+    send_control_message(msg)
+
+
+def on_move(x, y):
+    """
+    Handles mouse move events and sends the coordinates to the client.
+
+    :param x: X-coordinate of the pointer.
+    :param y: Y-coordinate of the pointer.
+    """
+    msg = f'Pointer moved to ({x}, {y})'
+    send_control_message(msg)
+
+
+def on_click(x, y, button, pressed):
+    """
+    Handles mouse click events and sends the action to the client.
+
+    :param x: X-coordinate of the click.
+    :param y: Y-coordinate of the click.
+    :param button: Button object representing the clicked mouse button.
+    :param pressed: Boolean indicating if the button is pressed or released.
+    """
+    action = "Pressed" if pressed else "Released"
+    if button == mouse.Button.left:
+        msg = f'{action} at ({x}, {y})'
+        send_control_message(msg)
+    elif button == mouse.Button.right:
+        msg = f'Right {action} at ({x}, {y})'
+        send_control_message(msg)
+
+
+def on_scroll(x, y, dx, dy):
+    """
+    Handles mouse scroll events and sends the action to the client.
+
+    :param x: X-coordinate of the scroll action.
+    :param y: Y-coordinate of the scroll action.
+    :param dx: Scroll movement in the X direction.
+    :param dy: Scroll movement in the Y direction.
+    """
+    direction = 'down' if dy < 0 else 'up'
+    msg = f'Scrolled {direction} at ({x}, {y})'
+    send_control_message(msg)
+
+
+def send_control_message(msg):
+    """
+    Sends a control message to the client.
+
+    :param msg: String message to be sent to the client.
+    """
+    msg_length = str(len(msg)).zfill(2)
+    control_socket.send((msg_length + msg).encode())
+
+
+def start_keyboard_listener():
+    """Starts the keyboard listener in a separate thread."""
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
+
+
+def start_mouse_listener():
+    """Starts the mouse listener in a separate thread."""
+    with mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll) as listener:
+        listener.join()
+
+
+def start_screen_server():
+    """Starts the screen-sharing server to receive and display frames from the client."""
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind(("0.0.0.0", 8080))
+    server_socket.listen(1)
+
+    print("Screen server is listening...")
+
+    client_socket, client_address = server_socket.accept()
+    print(f"Client {client_address} connected")
+
+    while True:
+        frame_size_bytes = client_socket.recv(4)
+        if not frame_size_bytes:
+            break
+
+        frame_size = int.from_bytes(frame_size_bytes, byteorder='big')
+        frame_data = b''
+        while len(frame_data) < frame_size:
+            packet = client_socket.recv(frame_size - len(frame_data))
+            if not packet:
+                break
+            frame_data += packet
+
+        frame_array = np.frombuffer(frame_data, dtype=np.uint8)
+        frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+        cv2.imshow('Screen Sharing', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    client_socket.close()
+    server_socket.close()
+    cv2.destroyAllWindows()
+
+
+# Control socket setup
+control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+control_socket.bind(("0.0.0.0", 8820))
+control_socket.listen(1)
+print("Control server is up and running")
+
+control_socket, client_c_address = control_socket.accept()
+print(f"Client {client_c_address} connected")
+
+# Start threads for screen sharing, keyboard, and mouse listeners
+screen_server_thread = threading.Thread(target=start_screen_server)
+keyboard_thread = threading.Thread(target=start_keyboard_listener)
+mouse_thread = threading.Thread(target=start_mouse_listener)
+
+screen_server_thread.start()
+keyboard_thread.start()
+mouse_thread.start()
+
+screen_server_thread.join()
+keyboard_thread.join()
+mouse_thread.join()
